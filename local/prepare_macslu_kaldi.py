@@ -24,7 +24,6 @@ def parse_args():
     )
     parser.add_argument(
         "--download-dir",
-        default="/share/nas167/teinhonglo/github_repo/apex-assistant/data/raw",
         type=str,
         required=True,
         help="Directory to store downloaded original files.",
@@ -38,7 +37,6 @@ def parse_args():
     parser.add_argument(
         "--kaldi-root",
         type=str,
-        default="data/mac_slu",
         required=True,
         help="Directory to write Kaldi-format data dirs.",
     )

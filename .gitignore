@@ -22,6 +22,5 @@ wheels/
 .vscode/
 venv/
 env/
-dump
+data-json
 exp
-data
