@@ -9,14 +9,15 @@ data_root="data/macslu"
 download_dir=${data_root}/raw
 extract_root=${data_root}/audio
 audio_dir=${data_root}/audio
-json_root=${data_root}/json
+json_root=data-json/macslu
 prompt_file=""   # 可指定外部 prompt 檔案，空字串則使用 prepare_macslu_jsonl.py 內建 prompt
 
 # training config
 nj=4
 gpuid=0
 suffix=
-train_conf=finetuning/train_conf/macslu_qwen3_asr_06b.json
+train_conf=conf/macslu_qwen3_asr_06b.json
+seed=66
 
 # stage
 stage=0
@@ -60,7 +61,7 @@ if [ $stage -le 1 ] && [ $stop_stage -ge 1 ]; then
     exp_dir=$exp_root
 
     CUDA_VISIBLE_DEVICES=$gpuid \
-        python finetuning/qwen3_asr_sft.py \
+        python finetuning/qwen3_asr_sft.py --seed $seed \
             --train_conf $train_conf \
             --train_file $data_dir/train.jsonl \
             --eval_file $data_dir/dev.jsonl \

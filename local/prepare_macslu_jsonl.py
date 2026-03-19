@@ -103,31 +103,59 @@ def load_jsonl(path: Path) -> List[dict]:
 
 
 def build_wav_index(audio_root: Path) -> Dict[str, List[Path]]:
-    idx: Dict[str, List[Path]] = {}
+    idx = {}
     for wav in audio_root.rglob("*.wav"):
-        idx.setdefault(wav.stem, []).append(wav.resolve())
+        wav_id = wav.stem
+        wav_path = wav.resolve()
+        idx[wav_id] = wav_path
     return idx
 
 
 def resolve_wav(raw_id: str, wav_index: Dict[str, List[Path]]) -> Path:
     raw_id = str(raw_id).strip()
-    matches = wav_index.get(raw_id, [])
-    uniq = sorted({str(p): p for p in matches}.values(), key=lambda p: str(p))
 
-    if len(uniq) == 1:
-        return uniq[0]
-    if len(uniq) > 1:
-        raise RuntimeError(f"Multiple wavs found for id={raw_id}: {uniq}")
+    if raw_id in wav_index:
+        wav_path = wav_index[raw_id]
+        return wav_path
+    else:
+        return None
 
-    raise FileNotFoundError(f"Cannot find wav for id={raw_id}")
+def to_semantics_text(ori_semantics):
+    """
+    Convert dev_set.jsonl semantics format to icl_label.jsonl semantics format.
+    # https://github.com/Gatsby-web/MAC_SLU/blob/main/icl_label.jsonl
+    """
+    results = []
 
+    if not isinstance(ori_semantics, dict):
+        return results
 
-def to_semantics_text(record: dict) -> str:
-    semantics = record.get("semantics", [])
-    if isinstance(semantics, list):
-        return json.dumps(semantics, ensure_ascii=False)
-    return "[]"
+    for _, domain_dict in ori_semantics.items():
+        if not isinstance(domain_dict, dict):
+            continue
 
+        for domain, items in domain_dict.items():
+            if not isinstance(items, list):
+                continue
+
+            new_item = {
+                "domain": domain,
+                "intent": "",
+                "slots": {}
+            }
+
+            for x in items:
+                name = x.get("name")
+                value = x.get("value")
+
+                if name == "intent":
+                    new_item["intent"] = value
+                elif name is not None:
+                    new_item["slots"][name] = value
+
+            results.append(new_item)
+
+    return json.dumps(results, ensure_ascii=False), results
 
 def main():
     args = parse_args()
@@ -156,22 +184,32 @@ def main():
 
         with out_path.open("w", encoding="utf-8") as f:
             for i, r in enumerate(records, start=1):
-                rid = str(r.get("id", i))
-                try:
-                    wav = resolve_wav(rid, wav_index)
-                except FileNotFoundError:
+                rid = f"id_{str(r.get("id", i))}"
+
+                wav_path = resolve_wav(rid, wav_index)
+
+                if wav_path is None:
+                    print(f"ID {rid} NOT found")
                     missing.append(rid)
                     continue
+
                 query = r.get("query", "")
-                semantics_text = to_semantics_text(r)
+                semantics = r.get("semantics", [])
+
+                '''
+                # 訓練時跳過
+                if len(semantics) == 0 and split == "train":
+                    continue
+                '''
+                
+                semantics_text, semantics = to_semantics_text(semantics)
                 row = {
                     "text_id": rid,
-                    "id": rid,
                     "query": query,
-                    "audio": str(wav),
+                    "audio": str(wav_path),
                     "prompt": prompt,
-                    "text": semantics_text,
-                    "semantics": r.get("semantics", []),
+                    "text": "language None<asr_text>"+semantics_text,
+                    "semantics": semantics
                 }
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
