@@ -30,6 +30,8 @@ from transformers import (GenerationConfig, Trainer, TrainerCallback,
                           TrainingArguments)
 from pathlib import Path
 
+import torchaudio.transforms as T
+
 # DEFAULT_PROMPT = """You are a professional Speech Analysis expert.
 #     Your task is to analyze the provided audio and execute the task:
    
@@ -209,6 +211,26 @@ class CastFloatInputsTrainer(Trainer):
             for k, v in list(inputs.items()):
                 if torch.is_tensor(v) and v.is_floating_point():
                     inputs[k] = v.to(dtype=model_dtype)#torch.float32)#
+
+        # 🌟 3. SpecAugment (確保只有在訓練模式，且有開啟設定時才執行)
+        spec_aug = getattr(self, "spec_aug_config", None)
+        if self.model.training and spec_aug and spec_aug.get("apply", False):
+            if "input_features" in inputs:
+                # 延遲初始化遮罩器 (只在第一次呼叫時建立)
+                if not hasattr(self, "_freq_mask"):
+                    self._freq_mask = T.FrequencyMasking(freq_mask_param=spec_aug.get("freq_mask_param", 27))
+                    self._time_mask = T.TimeMasking(time_mask_param=spec_aug.get("time_mask_param", 50))
+                
+                # 取得頻譜圖 Tensor (形狀通常是 [Batch, Freq_bins, Time_steps])
+                features = inputs["input_features"]
+                
+                # 隨機打上頻率與時間遮罩
+                features = self._freq_mask(features)
+                features = self._time_mask(features)
+                
+                # 將擴增後的特徵放回字典
+                inputs["input_features"] = features
+            
         return inputs
 
 class MakeEveryCheckpointInferableCallback(TrainerCallback):
@@ -406,6 +428,7 @@ def main():
     save_strategy = training_args_conf.get("save_strategy", "steps")
     save_steps = int(training_args_conf.get("save_steps", 200))
     save_total_limit = int(training_args_conf.get("save_total_limit", 5))
+    spec_aug_config = training_args_conf.get("spec_aug", None)
 
     use_bf16 = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 8
     asr_wrapper = Qwen3ASRModel.from_pretrained(
@@ -489,6 +512,7 @@ def main():
             )
         ],
     )
+    trainer.spec_aug_config = spec_aug_config
 
     os.makedirs(training_args.output_dir, exist_ok=True)
 

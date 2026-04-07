@@ -17,7 +17,7 @@ target="text_s"
 nj=4
 gpuid=0
 suffix=_s
-train_conf=conf/TinyStress_qwen3_asr_06b_freeze.json
+train_conf=conf/TinyStress_qwen3_asr_06b_aug.json
 seed=66
 
 # stage
