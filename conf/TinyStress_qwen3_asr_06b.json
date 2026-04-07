@@ -20,10 +20,12 @@
         "do_sample": false,
         "temperature": 1.0,
         "top_p": 1.0,
-        "finetune_type":"full"
+        "train_task":"asr_ssd"
     },
     {
         "model_path": "Qwen/Qwen3-ASR-0.6B",
+        "finetune_type":"full",
+        "lora_mode":"audio_encoder_llm_backbone",
         "dtype": "auto",
         "freeze_components": []
     }

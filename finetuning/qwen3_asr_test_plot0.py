@@ -12,6 +12,10 @@ import torch
 from qwen_asr import Qwen3ASRModel
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+# import seaborn as sns
+import numpy as np
+
 
 _CKPT_RE = re.compile(r"^checkpoint-(\d+)$")
 
@@ -32,6 +36,81 @@ _CKPT_RE = re.compile(r"^checkpoint-(\d+)$")
    
 #     - multiple stresses:
 #     language English<asr_text>I said red not blue<ssd>{"stress_pattern": "I said <stress> red </stress> not <stress> blue </stress>"}"""
+
+def visualize_multi_stress(gen_out, stress_indices, audio_wav, audio_path, sr=16000, title="Multi-Stress Alignment Analysis"):
+    """
+    gen_out: model.generate 的回傳物件 (需含 cross_attentions)
+    stress_indices: 包含所有 <stress> 位置的 list
+    audio_wav: 原始音訊數值 (numpy array or tensor)
+    """
+    if not stress_indices:
+        print("沒有找到 <stress> 標籤，跳過繪圖。")
+        return
+
+    num_stress = len(stress_indices)
+    # 建立畫布：1 個波形圖 + num_stress 個注意力圖
+    fig, axes = plt.subplots(num_stress + 1, 1, figsize=(15, 3 * (num_stress + 1)), sharex=True)
+    
+    # 取得音訊時間軸
+    duration = len(audio_wav) / sr
+    time_axis = np.linspace(0, duration, len(audio_wav))
+
+    # --- 1. 繪製原始波形 ---
+    axes[0].plot(time_axis, audio_wav, color='gray', alpha=0.4)
+    axes[0].set_title("Original Audio Waveform")
+    axes[0].set_ylabel("Amplitude")
+
+    # --- 2. 遍歷每個 <stress> 標籤並繪圖 ---
+    for i, token_idx in enumerate(stress_indices):
+        ax = axes[i + 1]
+        
+        # 提取該 Token 的 Cross-Attention (取最後一層，平均所有 Head)
+        # 結構: [step][layer][batch, head, query_len, key_len]
+        # 我們取最後一層 [-1]，第 0 個 batch [0]，平均所有 head [mean(0)]
+        # query_len 通常為 1 (因為是逐個生成的)，所以拿 [0, :]
+        attn_weights = gen_out.cross_attentions[token_idx][-1][0].mean(dim=0)[0].cpu().numpy()
+        
+        # 將 Attention 幀數映射到時間軸
+        attn_time = np.linspace(0, duration, len(attn_weights))
+        
+        # 繪製注意力曲線
+        ax.fill_between(attn_time, attn_weights, color='orange', alpha=0.6, label=f'Stress Token @ Index {token_idx}')
+        ax.set_ylabel("Attn Weight")
+        ax.legend(loc='upper right')
+        
+        # 在波形圖上標註對應的高亮區 (找出注意力最高的地方)
+        max_idx = np.argmax(attn_weights)
+        peak_time = attn_time[max_idx]
+        axes[0].axvline(x=peak_time, color='red', linestyle='--', alpha=0.5)
+        axes[0].text(peak_time, ax.get_ylim()[1], f" S{i+1}", color='red', verticalalignment='bottom')
+
+    axes[-1].set_xlabel("Time (seconds)")
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(f"plot_{audio_path}.png")
+    plt.show()
+
+# def plot_stress_attention(gen_out, token_index, audio_wav, sr=16000, id):
+#     # 1. 取得特定 Token 的 Cross-Attention (假設取最後一層，並對 Head 取平均)
+#     # gen_out.cross_attentions 結構: [step][layer][batch, head, query_len, key_len]
+#     last_layer_attn = gen_out.cross_attentions[token_index][-1] 
+#     attn_weights = last_layer_attn[0].mean(dim=0).cpu().numpy() # (1, audio_frames)
+    
+#     # 2. 建立畫布：上方波形，下方熱圖
+#     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    
+#     # 上方：原始波形
+#     time_axis = torch.linspace(0, len(audio_wav)/sr, len(audio_wav))
+#     ax1.plot(time_axis, audio_wav, color='gray', alpha=0.5)
+#     ax1.set_title("Audio Waveform")
+    
+#     # 下方：Attention 熱圖
+#     sns.heatmap(attn_weights, ax=ax2, cmap="YlGnBu", cbar=False)
+#     ax2.set_title(f"Cross-Attention for '<stress>' (Token Index: {token_index})")
+    
+#     plt.tight_layout()
+#     plt.savefig(f"plot_{id}.png")
+#     plt.show()
 
 def find_latest_checkpoint(output_dir: str) -> Optional[str]:
     if not output_dir or not os.path.isdir(output_dir):
@@ -182,10 +261,20 @@ def infer_one(
         gen_kwargs["top_p"] = top_p
 
     with torch.inference_mode():
-        gen_out = model.generate(**inputs, **gen_kwargs)
+        # gen_out = model.generate(**inputs, **gen_kwargs)
+        gen_out = model.generate(
+            **inputs, 
+            **gen_kwargs,
+            return_dict_in_generate=True,
+            output_attentions=True
+        )
 
+    # plot_stress_attention(gen_out, token_index, audio_wav, sr=16000, id)
+    #############
     output_ids = unwrap_generate_output(gen_out)
-
+    stress_token_id = processor.tokenizer.convert_tokens_to_ids("<stress>")
+    visualize_multi_stress(gen_out, stress_token_id, wav, audio_path)
+    #############
     if not torch.is_tensor(output_ids):
         raise TypeError(f"generate() returned unsupported type: {type(output_ids)}")
 
@@ -249,10 +338,9 @@ def write_ssd_prediction_jsonl(rows_out: List[Dict[str, Any]], output_root: str,
         for row in rows_out:
             item = {
                 "id": row["text_id"],
-                "pred_gender": row.get("pred_gender", ""),
+                "transcription": row.get("transcription", ""),
                 "pred_transcription": row.get("pred_transcription", ""),
-                "pred_transcription_0": row.get("pred_transcription_0", ""),
-                "pred_stress": row.get("pred_stress", ""),
+                "tasks": row.get("pred_tasks", {}),
             }
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
@@ -275,7 +363,7 @@ def parse_args():
 
     p.add_argument("--device", type=str, default="cuda:0",
                    help='e.g. "cuda:0", "cuda:1", "cpu"')
-    p.add_argument("--prompt_file", default="/datas/store162/annhung/Qwen3-SLU/prompt/prompt_ts.txt")
+    p.add_argument("--prompt-file", default="/datas/store162/annhung/Qwen3-SLU/prompt_ts.txt")
     p.add_argument("--target", default="text_ts")
     return p.parse_args()
 
@@ -301,16 +389,9 @@ def load_train_conf_from_exp_dir(exp_dir: str) -> Optional[List[Dict[str, Any]]]
 def main():
     args = parse_args()
 
-    prompt = "" #DEFAULT_PROMPT
+    prompt = ""
     if args.prompt_file:
         prompt = Path(args.prompt_file).read_text(encoding="utf-8").strip()
-    else:
-        raise ValueError("No prompt")
-
-    if args.target:
-        target = args.target
-    else:
-        raise ValueError("No prompt")
 
     train_conf = load_train_conf_from_exp_dir(args.exp_dir)
     if train_conf is None:
@@ -365,125 +446,22 @@ def main():
             temperature=temperature,
             top_p=top_p,
         )
-        if target == "text_ts":
-            if "<ssd>" in pred_raw:
-                pred_transcription_raw = pred_raw.split("<ssd>")[0]
-                pred_raw_text = pred_raw.split("<ssd>")[1]
-                pred_transcription = pred_transcription_raw.replace("language English", "").replace("<asr_text>", "").strip()
-                pred_raw_dict = try_parse_tasks_dict(pred_raw_text)
-                pred_stress = pred_raw_dict.get("stress_pattern", "")
 
-                pred_transcription_0 = pred_stress.replace("<stress>", "").replace("</stress>", "").strip()
-                pred_transcription_0 = " ".join(pred_transcription_0.split())
+        if "<ssd>" in pred_raw:
+            pred_transcription_raw = pred_raw.split("<ssd>")[0]
+            pred_raw = pred_raw.split("<ssd>")[1]
+            pred_transcription = pred_transcription_raw.replace("language English", "").replace("<asr_text>", "").strip()
+        else:
+            pred_transcription = ""
 
-                
-            else:
-                pred_transcription = ""
-
-            print(f"pred_<ssd>{pred_raw_text}")
-            rows_out.append({
-                "text_id": text_id,
-                "pred_transcription_0": pred_transcription_0,
-                "pred_transcription": pred_transcription,
-                "pred_stress": pred_stress
-            })
-
-        if target == "text_gts":
-            if "<ssd>" in pred_raw:
-                pred_transcription_raw = pred_raw.split("<ssd>")[0]
-                pred_raw_text = pred_raw.split("<ssd>")[1]
-                pred_transcription = pred_transcription_raw.replace("language English", "").replace("<asr_text>", "").strip()
-                pred_raw_dict = try_parse_tasks_dict(pred_raw_text)
-                pred_stress = pred_raw_dict.get("stress_pattern", "")
-                pred_gender = pred_raw_dict.get("gender", "")
-
-                pred_transcription_0 = pred_stress.replace("<stress>", "").replace("</stress>", "").strip()
-                pred_transcription_0 = " ".join(pred_transcription_0.split())
-
-            else:
-                pred_transcription = ""
-
-            print(f"pred_<ssd>{pred_raw_text}")
-            rows_out.append({
-                "text_id": text_id,
-                "pred_transcription_0": pred_transcription_0,
-                "pred_transcription": pred_transcription,
-                "pred_stress": pred_stress,
-                "pred_gender": pred_gender
-            })
-        
-        if target == "text_s":
-            if "<ssd>" in pred_raw:
-                pred_stress = pred_raw.split("<ssd>")[1]
-                pred_transcription = pred_stress.replace("<stress>", "").replace("</stress>", "").strip()
-                pred_transcription = " ".join(pred_transcription.split())
-            else:
-                pred_stress = ""
-
-            print(f"transcript:{pred_transcription}\nstress:{pred_stress}")
-            rows_out.append({
-                "text_id": text_id,
-                "pred_transcription": pred_transcription,
-                "pred_stress": pred_stress,
-            })
-
-        if target == "text_gs":
-            if "<ssd>" in pred_raw:
-                print(pred_raw)
-                pred_gender_raw = pred_raw.split("<ssd>")[0]
-                pred_stress = pred_raw.split("<ssd>")[1]
-                pred_transcription = pred_stress.replace("<stress>", "").replace("</stress>", "").strip()
-                pred_transcription = " ".join(pred_transcription.split())
-                if "<gender>" in pred_gender_raw:
-                    pred_gender = pred_gender_raw.split("<gender>")[1]
-                    print(pred_gender)
-                else:
-                    pred_gender = ""
-            else:
-                pred_stress = ""
-
-            print(f"pred: <gender>{pred_gender}<ssd>{pred_stress}")
-            rows_out.append({
-                "text_id": text_id,
-                "pred_gender": pred_gender,
-                "pred_transcription": pred_transcription,
-                "pred_stress": pred_stress,
-            })
-        
-        if target == "text_tgs":
-            if "<ssd>" in pred_raw:
-                print(pred_raw)
-                pred_gender_raw = pred_raw.split("<ssd>")[0]
-                pred_stress = pred_raw.split("<ssd>")[1]
-                pred_transcription_0 = pred_stress.replace("<stress>", "").replace("</stress>", "").strip()
-                pred_transcription_0 = " ".join(pred_transcription_0.split())
-                if "<gender>" in pred_gender_raw:
-                    pred_transcription_raw = pred_gender_raw.split("<gender>")[0]
-                    pred_gender = pred_gender_raw.split("<gender>")[1]
-                    print(pred_gender)
-                    if "<asr_text>" in pred_transcription_raw:
-                        pred_transcription = pred_transcription_raw.split("<asr_text>")[1]
-                        print(pred_gender)
-                    else:
-                        pred_transcription = ""
-                else:
-                    pred_gender = ""
-                    if "<asr_text>" in pred_gender_raw:
-                        pred_transcription = pred_gender_raw.split("<asr_text>")[1]
-                        print(pred_gender)
-                    else:
-                        pred_transcription = ""
-            else:
-                pred_stress = ""
-
-            print(f"pred: <transcription>{pred_transcription}<gender>{pred_gender}<ssd>{pred_stress}")
-            rows_out.append({
-                "text_id": text_id,
-                "pred_gender": pred_gender,
-                "pred_transcription_0": pred_transcription_0,
-                "pred_transcription": pred_transcription,
-                "pred_stress": pred_stress,
-            })
+        print(f"pred_<ssd>{pred_raw}")
+        rows_out.append({
+            "text_id": text_id,
+            "transcription": transcription,
+            "pred_transcription": pred_transcription,
+            "pred_raw": pred_raw,
+            "pred_tasks": try_parse_tasks_dict(pred_raw),
+        })
 
         print(f"[{i}/{len(rows)}] done: {text_id}")
 

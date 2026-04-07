@@ -114,12 +114,9 @@ def build_prefix_messages(prompt: str, audio_array):
     ]
 
 
-def make_preprocess_fn_prefix_only(processor, target, prompt_file):
+def make_preprocess_fn_prefix_only(processor, target):
     def _preprocess(ex: Dict[str, Any]) -> Dict[str, Any]:
-        # prompt = ex.get("prompt", "")
-        prompt = "" #DEFAULT_PROMPT
-        if prompt_file:
-            prompt = Path(prompt_file).read_text(encoding="utf-8").strip()
+        prompt = ex.get("prompt", "")
         dummy_audio = None
         prefix_msgs = build_prefix_messages(prompt, dummy_audio)
         prefix_text = processor.apply_chat_template(
@@ -256,7 +253,7 @@ def parse_args():
     # Resume
     p.add_argument("--resume_from", type=str, default="")
     p.add_argument("--resume", type=int, default=0)
-    p.add_argument("--prompt_file", type=str, default="/datas/store162/annhung/Qwen3-SLU/prompt/prompt_ts.txt")
+    p.add_argument("--prompt-file", type=str, default="/datas/store162/annhung/Qwen3-SLU/prompt_ts.txt")
     p.add_argument("--target", type=str, default="text_ts")
 
     return p.parse_args()
@@ -430,7 +427,7 @@ def main():
             **({"validation": args_cli.eval_file} if args_cli.eval_file else {}),
         },
     )
-    ds = raw_ds.map(make_preprocess_fn_prefix_only(processor, args_cli.target, args_cli.prompt_file), num_proc=1)
+    ds = raw_ds.map(make_preprocess_fn_prefix_only(processor, args_cli.target), num_proc=1)
 
     keep = {"prompt", "audio", "target", "prefix_text"}
     for split in ds.keys():
@@ -439,11 +436,9 @@ def main():
             ds[split] = ds[split].remove_columns(drop)
 
     # default_prompt = extract_default_prompt(ds["train"], )
-    default_prompt = "" #DEFAULT_PROMPT
+    default_prompt = ""
     if args_cli.prompt_file:
         default_prompt = Path(args_cli.prompt_file).read_text(encoding="utf-8").strip()
-    else:
-        raise ValueError("No prompt")
 
     collator = DataCollatorForQwen3ASRFinetuning(processor=processor, sampling_rate=sr)
 

@@ -1,0 +1,17 @@
+You are a professional Speech Analysis expert.
+Your task is to analyze the provided audio and execute the task:
+
+Transcription & Stress Detection (Stress Pattern): Transcribe the spoken English accurately. If a word is emphasized or stressed by the speaker, explicitly wrap it with <stress> and </stress> tags.
+
+You must strictly follow this output format:
+language English<asr_text>[Clean Transcription]<ssd>{"stress_pattern": "[Tagged Transcription]"}
+
+Example Outputs:
+- single stress:
+language English<asr_text>add seven hours to your two hour timer, right?<ssd>{"stress_pattern": "add seven <stress> hours </stress> to your two hour timer, right?"}
+
+- no stress:
+language English<asr_text>turn off the living room lights<ssd>{"stress_pattern": "turn off the living room lights"}
+
+- multiple stresses:
+language English<asr_text>I said red not blue<ssd>{"stress_pattern": "I said <stress> red </stress> not <stress> blue </stress>"}

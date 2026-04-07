@@ -12,6 +12,10 @@ import torch
 from qwen_asr import Qwen3ASRModel
 from pathlib import Path
 
+import matplotlib.pyplot as plt
+# import seaborn as sns
+import numpy as np
+
 
 _CKPT_RE = re.compile(r"^checkpoint-(\d+)$")
 
@@ -32,6 +36,81 @@ _CKPT_RE = re.compile(r"^checkpoint-(\d+)$")
    
 #     - multiple stresses:
 #     language English<asr_text>I said red not blue<ssd>{"stress_pattern": "I said <stress> red </stress> not <stress> blue </stress>"}"""
+
+def visualize_multi_stress(gen_out, stress_indices, audio_wav, audio_path, sr=16000, title="Multi-Stress Alignment Analysis"):
+    """
+    gen_out: model.generate 的回傳物件 (需含 cross_attentions)
+    stress_indices: 包含所有 <stress> 位置的 list
+    audio_wav: 原始音訊數值 (numpy array or tensor)
+    """
+    if not stress_indices:
+        print("沒有找到 <stress> 標籤，跳過繪圖。")
+        return
+
+    num_stress = len(stress_indices)
+    # 建立畫布：1 個波形圖 + num_stress 個注意力圖
+    fig, axes = plt.subplots(num_stress + 1, 1, figsize=(15, 3 * (num_stress + 1)), sharex=True)
+    
+    # 取得音訊時間軸
+    duration = len(audio_wav) / sr
+    time_axis = np.linspace(0, duration, len(audio_wav))
+
+    # --- 1. 繪製原始波形 ---
+    axes[0].plot(time_axis, audio_wav, color='gray', alpha=0.4)
+    axes[0].set_title("Original Audio Waveform")
+    axes[0].set_ylabel("Amplitude")
+
+    # --- 2. 遍歷每個 <stress> 標籤並繪圖 ---
+    for i, token_idx in enumerate(stress_indices):
+        ax = axes[i + 1]
+        
+        # 提取該 Token 的 Cross-Attention (取最後一層，平均所有 Head)
+        # 結構: [step][layer][batch, head, query_len, key_len]
+        # 我們取最後一層 [-1]，第 0 個 batch [0]，平均所有 head [mean(0)]
+        # query_len 通常為 1 (因為是逐個生成的)，所以拿 [0, :]
+        attn_weights = gen_out.attentions[token_idx][-1][0].mean(dim=0)[0].cpu().numpy()
+        
+        # 將 Attention 幀數映射到時間軸
+        attn_time = np.linspace(0, duration, len(attn_weights))
+        
+        # 繪製注意力曲線
+        ax.fill_between(attn_time, attn_weights, color='orange', alpha=0.6, label=f'Stress Token @ Index {token_idx}')
+        ax.set_ylabel("Attn Weight")
+        ax.legend(loc='upper right')
+        
+        # 在波形圖上標註對應的高亮區 (找出注意力最高的地方)
+        max_idx = np.argmax(attn_weights)
+        peak_time = attn_time[max_idx]
+        axes[0].axvline(x=peak_time, color='red', linestyle='--', alpha=0.5)
+        axes[0].text(peak_time, ax.get_ylim()[1], f" S{i+1}", color='red', verticalalignment='bottom')
+
+    axes[-1].set_xlabel("Time (seconds)")
+    plt.suptitle(title, fontsize=16)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(f"plot_{audio_path}.png")
+    plt.show()
+
+# def plot_stress_attention(gen_out, token_index, audio_wav, sr=16000, id):
+#     # 1. 取得特定 Token 的 Cross-Attention (假設取最後一層，並對 Head 取平均)
+#     # gen_out.cross_attentions 結構: [step][layer][batch, head, query_len, key_len]
+#     last_layer_attn = gen_out.cross_attentions[token_index][-1] 
+#     attn_weights = last_layer_attn[0].mean(dim=0).cpu().numpy() # (1, audio_frames)
+    
+#     # 2. 建立畫布：上方波形，下方熱圖
+#     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), sharex=True)
+    
+#     # 上方：原始波形
+#     time_axis = torch.linspace(0, len(audio_wav)/sr, len(audio_wav))
+#     ax1.plot(time_axis, audio_wav, color='gray', alpha=0.5)
+#     ax1.set_title("Audio Waveform")
+    
+#     # 下方：Attention 熱圖
+#     sns.heatmap(attn_weights, ax=ax2, cmap="YlGnBu", cbar=False)
+#     ax2.set_title(f"Cross-Attention for '<stress>' (Token Index: {token_index})")
+    
+#     plt.tight_layout()
+#     plt.savefig(f"plot_{id}.png")
+#     plt.show()
 
 def find_latest_checkpoint(output_dir: str) -> Optional[str]:
     if not output_dir or not os.path.isdir(output_dir):
@@ -154,6 +233,14 @@ def infer_one(
     temperature: float = 1.0,
     top_p: float = 1.0,
 ) -> str:
+    # 1. 強制切換模式 (放在最前面)
+    if hasattr(asr_wrapper.model, "thinker"):
+        asr_wrapper.model.thinker.config._attn_implementation = "eager"
+    # 2. 為了萬無一失，也對 config 做設定
+    asr_wrapper.model.config._attn_implementation = "eager"
+    if hasattr(asr_wrapper.model, "thinker"):
+        asr_wrapper.model.thinker.config._attn_implementation = "eager"
+    ############
     processor = asr_wrapper.processor
     model = asr_wrapper.model
     device = next(model.parameters()).device
@@ -182,10 +269,34 @@ def infer_one(
         gen_kwargs["top_p"] = top_p
 
     with torch.inference_mode():
-        gen_out = model.generate(**inputs, **gen_kwargs)
+        # gen_out = model.generate(**inputs, **gen_kwargs)
+        gen_out = model.generate(
+            **inputs, 
+            **gen_kwargs,
+            # output_cross_attentions=True
+            output_attentions=True
+        )
 
     output_ids = unwrap_generate_output(gen_out)
-
+    #######################
+    print(output_ids)
+    test_text = "<stress>"
+    target_ids = processor.tokenizer.encode(test_text, add_special_tokens=False)
+    print(f"字串 '<stress>' 對應的 Token IDs 為: {target_ids}")
+    gen_only_ids = output_ids[:, prefix_len:]
+    gen_ids_list = gen_only_ids[0].tolist()
+    print(gen_ids_list)
+    n = len(target_ids)
+    # found_indices = []
+    stress_core_id = 94190
+    stress_indices = [i for i, tid in enumerate(gen_ids_list) if tid == stress_core_id]
+    # for i in range(len(seq) - n + 1):
+    #     if seq[i] == 94190:
+    #         found_indices.append(i) # 這是 <stress> 開始的位置
+    # stress_token_id = processor.tokenizer.convert_tokens_to_ids("<stress>")
+    print(stress_indices)
+    visualize_multi_stress(gen_out, stress_indices, wav, audio_path)
+    #######################
     if not torch.is_tensor(output_ids):
         raise TypeError(f"generate() returned unsupported type: {type(output_ids)}")
 
@@ -339,6 +450,7 @@ def main():
         model_path,
         dtype=dtype,
         device_map=args.device,
+        attn_implementation="eager",
     )
 
     rows = load_jsonl(args.input_jsonl)
